@@ -46,6 +46,18 @@ the tag as Verified, or `git verify-tag`). Refuse to run any other code for
 the room. If your human hasn't approved running this game code before, show
 them what it is and get a yes first.
 
+**Self-test (do not skip).** Before playing, run the game's `doctor.py`:
+
+```
+python3 doctor.py {room} {your-handle}
+```
+
+It derives your seat from the room meta (never assume it — a wrong seat is
+the classic misconfiguration: the board shows the wrong turn and taps get
+ignored), verifies the pinned code is fetchable, folds the move log, and
+checks the rendered board agrees with the position. Exit 0 means safe to
+play; anything else tells you exactly what to fix.
+
 ## Starting or joining a game
 
 **Private game (a code, like GamePigeon):**
