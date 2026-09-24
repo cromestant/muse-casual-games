@@ -3,33 +3,77 @@
 ## Principles
 
 1. **Agents are the clients.** Every player is a Muse user. Their agent fetches
-   game code, holds state, renders to chat, and talks to the relay.
+   game code, holds state, renders an interactive board, and talks to the
+   relay.
 2. **Async-first.** Turns may be seconds or days apart. No persistent
    connections; polling is the baseline. GamePigeon-style: one move per turn,
    then it resolves.
 3. **Relay-first networking.** Players never connect to each other. One shared
-   relay (Redis) holds lobbies and append-only room logs.
+   relay — an HTTPS API at `https://relay.onthe1.app` — holds lobbies, rooms,
+   the code itself, and append-only room logs. (It stores state in Redis
+   internally; players never touch Redis.)
 4. **Event-sourced rooms.** The log is the truth; state is folded from moves.
 5. **Deterministic logic.** Game code is pure functions of `(state, move)`.
    Simulations resolve identically everywhere, which doubles as cheat
    verification.
 6. **Hidden state never touches the relay.** Private info lives only on the
    owner's computer.
-7. **v0 trusts players, verifies afterwards.** The relay is a dumb pipe;
+7. **Interactive canvas, always.** Games render as a tappable board widget
+   (WIDGETS.md). Text rendering is a fallback, never the primary experience.
+8. **v0 trusts players, verifies afterwards.** The relay is a dumb pipe;
    cheating is detectable (commit-reveal, re-foldable logs), not prevented.
-   Acceptable for friendly play; phase 3 adds a validating relay.
+   Acceptable for friendly play.
 
 ## Roles
 
-- **Game package** — versioned public code (this repo). Manifest + pure logic
-  + text renderer.
+- **Game package** — versioned public code (this repo, or served by the relay
+  itself). Manifest + pure logic + interactive board.
 - **Player agent** — fetches the package, manages rooms for its human,
-  renders state in chat, nudges on turn changes.
-- **Relay** — Redis on a VPS. Lobbies, room logs, commitments. Dumb in v0.
+  presents the board, posts validated moves, nudges on turn changes.
+- **Relay** — the HTTPS API. Rooms, move logs, lobbies, commitments, and the
+  game code. Identity-checked (handle secrets, seat ownership) but
+  game-rule-dumb in v0.
+
+## Getting the code
+
+A player agent needs the game package before it can play. Two equivalent
+sources, same bytes:
+
+1. **GitHub** (source of truth): `https://github.com/cromestant/muse-casual-games`
+   — clone or fetch, check out the room's pinned version.
+2. **The relay itself**: `GET /v0/code/{version}/games` lists what's available;
+   `GET /v0/code/{version}/{path}` returns raw file bytes (e.g.
+   `/v0/code/v0.1.0/games/tic-tac-toe/logic.py`). No GitHub access needed.
+
+`{version}` is a signed release tag (`v0.1.0`) or an exact commit SHA.
+GitHub is where releases are published and signed; the relay serves a clone
+of it. Either way:
+
+- **Pin the version.** The room records the exact commit; agents run that and
+  nothing else for that room.
+- **Verify the signature.** Release tags are SSH-signed by `cromestant`
+  (GitHub shows them as Verified). Check before first run.
+- **First-run approval.** Before executing a game package the first time, the
+  agent shows the human what it is and what it will do, and gets a yes.
+- **Sandbox.** Game code runs in its own directory; network egress limited to
+  the relay host. Game code never sees the rest of the user's computer.
 
 ## Game package
 
-`games/<slug>/` contains `manifest.json`:
+`games/<slug>/` contains:
+
+- `manifest.json` — game metadata (below).
+- `logic.py` — the pure logic module. MUST expose (no I/O, no clock, no
+  unseeded RNG):
+  - `initial_state(config) -> state`
+  - `validate(state, move) -> None` (raises on illegal move)
+  - `apply(state, move) -> new_state` (must call `validate` first)
+  - `is_terminal(state) -> bool`
+  - `winners(state) -> [seats]`
+  - `next_seats(state) -> [seats]` (whose turn it is)
+  - `render(state, perspective_seat) -> str` (text board — fallback only)
+- `board.html` — the interactive board widget template (WIDGETS.md).
+  **Required.** A game without a board is not a game here.
 
 ```json
 {
@@ -41,64 +85,87 @@
   "hidden_state": false,
   "phases": ["play"],
   "logic": "logic.py",
+  "board": "board.html",
   "move_types": ["shot"]
 }
 ```
 
-The logic module MUST expose these pure functions (no I/O, no clock, no
-unseeded RNG):
+## Identity
 
-- `initial_state(config) -> state`
-- `validate(state, move) -> None` (raises on illegal move)
-- `apply(state, move) -> new_state` (must call `validate` first)
-- `is_terminal(state) -> bool`
-- `winners(state) -> [seats]`
-- `next_seats(state) -> [seats]` (whose turn it is)
-- `render(state, perspective_seat) -> str` (text board for chat)
+Self-chosen handle, e.g. `charles-7f3a`. Registered once:
 
-`move` is the envelope below minus transport fields: `{"seat", "type", "payload"}`.
+```
+POST /v0/players/register
+{"handle": "charles-7f3a", "secret": "<invented, kept private>"}
+```
 
-## Identity (v0)
+The secret is stored as a hash. Every mutating call carries
+`{handle, secret}`; the relay returns 401 on a bad secret. v0 is
+friendly-play auth — good enough until there's a reason for public-key
+challenges.
 
-Self-chosen handle, e.g. `charles-7f3a`. The relay stores
-`mg:player:<handle>` with a secret hash; the agent proves the handle with the
-secret when creating rooms or joining lobbies. v0 is friendly-play auth —
-good enough until there's a reason for public-key challenges (phase 3).
+## Rooms — the messaging format
 
-## Rooms
+Rooms are created over HTTPS and identified by a short human-readable code
+shared out-of-band (text it to your friend, like GamePigeon).
 
-- **Code**: short, human-readable, generated by the creator, e.g. `GOLF-7Q2P`.
-  Shared out-of-band (text it to your friend).
-- **Lifecycle**: `open` (waiting for seats) → `active` → `finished`.
-- `mg:room:<code>` (Redis hash): `game`, `version_sha` (exact commit the room
-  runs — every client must run this and nothing else), `seats` (ordered
-  handles as JSON), `status`, `config` (JSON), `created_ts`.
-- A room with all seats filled and at least one move becomes `active`. When
-  `is_terminal` folds true, any client may mark it `finished` (and run the
-  reveal phase if the game has one).
+**Create:**
+
+```
+POST /v0/rooms
+{"handle": "...", "secret": "...", "game": "tic-tac-toe",
+ "version_sha": "<exact commit the room runs>",
+ "seats": ["charles-7f3a", "rival-9b1c"],   // ordered; index == seat number
+ "config": {}}
+-> {"code": "KX7Q-2M4P"}
+```
+
+**Read:**
+
+```
+GET /v0/rooms/KX7Q-2M4P
+-> {"game": "tic-tac-toe", "version_sha": "...",
+    "seats": ["charles-7f3a", "rival-9b1c"], "status": "open|active|finished",
+    "config": {}, "created_ts": 1758746994}
+```
+
+**Lifecycle:** `open` (waiting for seats) → `active` (first move posted) →
+`finished` (any client may mark it finished when `is_terminal` folds true,
+running the reveal phase first if the game has one).
 
 ## Moves — the log is the truth
 
-- `mg:room:<code>:moves` is a Redis stream. One entry per move, appended by the
-  player whose turn it is.
-- Envelope:
+**Post** (only the seat's owner; the relay checks handle-vs-seat, not rules):
 
-```json
-{
-  "seat": 1,
-  "handle": "lunk-fan-42",
-  "type": "shot",
-  "payload": {"angle_deg": 42.5, "power": 0.73},
-  "ts": 1758746994
-}
+```
+POST /v0/rooms/KX7Q-2M4P/moves
+{"handle": "...", "secret": "...", "seat": 1,
+ "type": "shot", "payload": {"angle_deg": 42.5, "power": 0.73}}
+-> {"seq": 3}
 ```
 
-- The stream ID is the sequence number. Clients fold from entry 0 to get
-  current state; new joiners catch up by reading the whole stream.
-- Clients MUST `validate` locally before appending (catches misclicks) and
-  re-validate on read. A move that fails validation is ignored by honest
-  clients and the offender's handle is flagged in chat. (v0: social policing.
-  Phase 3: the relay rejects it.)
+Wrong secret → 401. Seat not owned by handle → 403. Unknown room → 404.
+
+**Read** (public — this is what board widgets poll):
+
+```
+GET /v0/rooms/KX7Q-2M4P/moves[?since=N]
+-> {"moves": [
+      {"seat": 1, "handle": "rival-9b1c", "type": "shot",
+       "payload": {"angle_deg": 42.5, "power": 0.73}, "ts": 1758746994},
+      ...
+    ], "since": 0}
+```
+
+The envelope the client folds is `{"seat", "type", "payload"}`; `handle`
+and `ts` are transport metadata. Rules for clients:
+
+- **Validate locally before sending** (`validate(state, move)`) — catches
+  misclicks before anything leaves the computer.
+- **Re-validate on read.** A move that fails validation is ignored by honest
+  clients and the offender's handle is flagged in chat. (v0: social policing.)
+- **The log is the truth.** If local state disagrees with the log, re-fold.
+  New joiners catch up by reading the whole log.
 
 ## Turn policies
 
@@ -117,16 +184,16 @@ Patterns:
 - **Owner-declared.** Battleship: only the fleet owner can know whether a shot
   hit, so the owner declares `hit`/`miss`/`sunk`. Honesty is enforced by
   commit-reveal, not by authority.
-- **Commit-reveal.** During the `commit` phase each seat publishes
-  `sha256(canonical_json(secret) + nonce)` to `mg:room:<code>:commits`. After
-  the game, everyone publishes `{"secret", "nonce"}` as `reveal` moves and any
-  client can verify every commitment and re-check every claim made during play.
-  A liar is caught, publicly, with proof.
+- **Commit-reveal.** During the `commit` phase each seat publishes a
+  commitment: `POST /v0/rooms/{code}/commits {"commitment": sha256(...)}`.
+  After the game, everyone publishes `{"secret", "nonce"}` as `reveal` moves
+  and any client can verify every commitment and re-check every claim made
+  during play. A liar is caught, publicly, with proof. Read commitments via
+  `GET /v0/rooms/{code}/commits`.
 - **The dealer problem.** Card hands need someone to shuffle and deal without
-  seeing. v0 does not solve this — card games wait for phase 2, where the
-  options are a relay-dealt design (phase-3 validating relay as dealer) or
-  cryptographic card dealing (mental poker — heavy; probably not). Documented
-  here so nobody builds a card game on v0 and acts surprised.
+  seeing. v0 does not solve this — card games wait until there's a
+  relay-dealt design or a validating relay. Documented here so nobody builds
+  a card game on v0 and acts surprised.
 
 ## Determinism
 
@@ -139,11 +206,11 @@ Patterns:
 
 ## Lobby & matchmaking
 
-- `mg:lobby:<game>` (Redis list): entries of `{"handle", "since_ts"}`.
-- Any agent watching the lobby that sees `>= min_players` waiting may pop them
-  and create a room, then tell each human their room code in chat. (First
-  watcher wins; room creation is idempotent-ish — v0 keeps this simple and
-  human-speed, which makes races rare and harmless.)
+- `POST /v0/lobby/{game}/join` / `/leave` (authed), `GET /v0/lobby/{game}`
+  (public) → `{"game": ..., "waiting": [{"handle": ..., "since_ts": ...}]}`.
+- Any agent watching the lobby that sees `>= min_players` waiting may create
+  a room and tell each human the code in chat. (First watcher wins; v0 keeps
+  this human-speed, which makes races rare and harmless.)
 - Private games skip the lobby: creator makes the room with chosen seats and
   shares the code directly.
 
@@ -152,30 +219,36 @@ Patterns:
 - Baseline: the agent runs a periodic check (every few minutes): "any of my
   human's rooms where it's their turn and I haven't told them yet?" → chat
   nudge. Async-friendly, no infra.
-- Future: Redis keyspace notifications → relay webhooks → push. Not v0.
+- The interactive board also polls the relay itself, so the human *sees*
+  rival moves live without any agent involvement.
 
 ## Security model
 
 - **Pin the SHA.** The room records the exact commit; agents refuse to run any
   other code for that room. Updating a game mid-room is impossible by design.
-- **First-run approval.** Before executing a game package the first time, the
-  agent shows the human what it is and what it will do, and gets a yes.
+- **Signed releases.** Tags are SSH-signed by the publisher; clients verify
+  before first run (GitHub shows Verified, or `git verify-tag`).
+- **First-run approval.** The agent shows the human what the code is and gets
+  a yes before executing.
 - **Sandbox.** Game code runs in its own directory; network egress limited to
-  the relay host. Game code never sees the rest of the user's computer.
+  the relay host.
 - **Scope.** v0 is friendly play: no money, no ranked ladder. Cheating is
-  detectable and socially policed, which is enough until phase 3.
+  detectable and socially policed.
 
 ## Versioning
 
 Manifest `version` is semver; rooms pin the commit SHA, not the version
-number. A client may run a different checkout only if the manifest declares
-it compatible (v0: keep it simple — exact SHA match required).
+number. Exact SHA match required — a client may not substitute a different
+checkout.
 
-## What's next (phases)
+## Status & roadmap
 
-- **Phase 0** — solo vs your agent, no relay. (Tic-tac-toe works today.)
-- **Phase 1** — relay rooms + game codes; battleship (commit-reveal).
-- **Phase 2** — lobby matchmaking; mini golf; card games (dealer design).
-- **Phase 3** — validating relay service in front of Redis: checks every move,
-  deals cards, holds secrets. Cheating becomes impossible, not just
-  detectable.
+Working today: relay rooms + private codes + lobby over the public HTTPS
+API; code distribution from the relay; signed releases; interactive board
+widgets; tic-tac-toe fully playable.
+
+Next: battleship commit-reveal wired end-to-end over the API; mini-golf
+course select; the player skill/connector so any Muse can discover and play
+without a manual brief. Later: card games (needs the dealer design), and a
+validating relay that checks moves against the rules (cheating becomes
+impossible, not just detectable).

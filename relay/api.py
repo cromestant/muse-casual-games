@@ -242,3 +242,84 @@ def lobby_leave(game: str, p: Authed):
             r.lrem(f"mg:lobby:{game}", 1, e)
             removed += 1
     return {"game": game, "removed": removed}
+
+
+# ---------- code distribution ----------
+#
+# The relay also serves the game code itself, so a player agent can fetch
+# exactly the version a room pins without touching github.com:
+#   GET /v0/code/versions            -> {"versions": ["v0.1.0", ...]}
+#   GET /v0/code/{version}/games     -> [{slug, manifest}, ...]
+#   GET /v0/code/{version}/{path}    -> raw file bytes at that tag/commit
+# Served from a local clone of the public repo via `git show` (no working
+# tree involved). GitHub remains the source of truth: push and sign tags
+# there; the clone lazy-fetches on a cache miss.
+
+CODE_DIR = "/var/www/relay.onthe1.app/code"
+
+
+def _git_bytes(*args: str):
+    import subprocess
+    return subprocess.run(["git", "-C", CODE_DIR, *args],
+                          capture_output=True, timeout=25)
+
+
+def _tags() -> list:
+    p = _git_bytes("tag", "--list")
+    return p.stdout.decode().split() if p.returncode == 0 else []
+
+
+def resolve_version(v: str) -> str:
+    import re
+    if v in _tags():
+        return v
+    if re.fullmatch(r"[0-9a-f]{40}", v or "") and \
+            _git_bytes("cat-file", "-e", v).returncode == 0:
+        return v
+    # clone may be stale — fetch once and retry
+    _git_bytes("fetch", "origin", "--tags", "--quiet")
+    if v in _tags():
+        return v
+    if re.fullmatch(r"[0-9a-f]{40}", v or "") and \
+            _git_bytes("cat-file", "-e", v).returncode == 0:
+        return v
+    from fastapi import HTTPException
+    raise HTTPException(status_code=404, detail="unknown version")
+
+
+@app.get("/v0/code/versions")
+def code_versions():
+    return {"versions": sorted(_tags())}
+
+
+@app.get("/v0/code/{version}/games")
+def code_games(version: str):
+    import json
+    v = resolve_version(version)
+    p = _git_bytes("ls-tree", "--name-only", f"{v}:games")
+    if p.returncode != 0:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="no games at this version")
+    games = []
+    for slug in p.stdout.decode().split():
+        m = _git_bytes("show", f"{v}:games/{slug}/manifest.json")
+        manifest = json.loads(m.stdout.decode()) if m.returncode == 0 else {}
+        games.append({"slug": slug, "manifest": manifest})
+    return {"version": v, "games": games}
+
+
+@app.get("/v0/code/{version}/{path:path}")
+def code_file(version: str, path: str):
+    from fastapi import HTTPException
+    from fastapi.responses import Response
+    v = resolve_version(version)
+    parts = [seg for seg in path.split("/") if seg not in ("", ".")]
+    if not parts or ".." in parts:
+        raise HTTPException(status_code=400, detail="bad path")
+    clean = "/".join(parts)
+    blob = _git_bytes("show", f"{v}:{clean}")
+    if blob.returncode != 0:
+        raise HTTPException(status_code=404, detail="no such file")
+    media = "text/plain" if clean.endswith((".py", ".md", ".json")) \
+        else "application/octet-stream"
+    return Response(content=blob.stdout, media_type=media)

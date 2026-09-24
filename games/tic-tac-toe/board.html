@@ -1,13 +1,13 @@
 <div id="ttt" style="box-sizing:border-box;max-width:340px;margin:0 auto;padding:12px;background:var(--hatch-widget-surface);border:1px solid var(--hatch-widget-border);border-radius:12px;box-shadow:var(--hatch-widget-shadow);">
   <div id="ttt-status" style="text-align:center;font-weight:600;color:var(--hatch-widget-text);margin-bottom:10px;min-height:1.4em;">Connecting…</div>
   <div id="ttt-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;"></div>
-  <div style="text-align:center;color:var(--hatch-widget-muted);font-size:12px;margin-top:10px;">Room N97U-83TL · you are X · live from relay.onthe1.app</div>
+  <div style="text-align:center;color:var(--hatch-widget-muted);font-size:12px;margin-top:10px;">Room __ROOM__ · you are __MARK__ · live from the relay</div>
 </div>
 <script>
 (function(){
-  var ROOM = "N97U-83TL";
-  var BASE = "https://relay.onthe1.app";
-  var ME = 0; // Charles is seat 0 = X
+  var ROOM = "__ROOM__";
+  var BASE = "__RELAY__";
+  var ME = __SEAT__;
   var grid = document.getElementById("ttt-grid");
   var statusEl = document.getElementById("ttt-status");
   var state = window.hatchWidget.getState({selected: null});

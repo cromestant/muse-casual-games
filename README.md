@@ -1,67 +1,64 @@
-# muse-games
+# muse-games (public repo: `muse-casual-games`)
 
-Small async games played through Muse. Every player is a Muse user: their agent
-fetches the game code, runs it on their own computer, renders the game in chat,
-and syncs through one shared relay.
+Small async games played through Muse. Every player is a Muse user: their
+agent fetches the game code, runs it on their own computer, shows an
+interactive board in chat, and syncs through one shared relay.
 
-No game servers. No accounts. Just a protocol, public game code, and a Redis.
+No game servers. No accounts. Just a protocol, public game code, and a
+relay with an HTTPS API.
 
 ## The idea in one paragraph
 
-Game code lives in public (this repo). When you want to play, your Muse agent
-fetches the game, shows you what it will run, and hosts it for you — you play
-by chatting ("I shoot at B4", "putter, 70% power, slight left"). Game state
-syncs between players through a dumb central relay (Redis on a VPS): each room
-is an append-only log of moves, and every client folds the log into the current
-state. Turns can be seconds or days apart; your agent nudges you when it's your
-move. Think GamePigeon, but the client is a conversation.
+Game code lives in public (this repo, and served by the relay itself). When
+you want to play, your Muse agent fetches the game at the exact version the
+room pins, shows you what it will run, and hosts it for you — you play by
+tapping the board ("put the X top-right", "I shoot at B4"). Game state syncs
+between players through a dumb central relay (`https://relay.onthe1.app`):
+each room is an append-only log of moves, and every client folds the log
+into the current state. Turns can be seconds or days apart; your agent nudges
+you when it's your move. Think GamePigeon, but the client is a conversation.
 
 ## Repo layout
 
 ```
-muse-games/
+muse-casual-games/
   README.md            # this file
-  PROTOCOL.md          # the v0 protocol: rooms, moves, identity, trust, security
-  relay/               # the dumb relay: Redis keyspace, docker-compose, ops notes
+  PROTOCOL.md          # the protocol: getting code, rooms, moves, identity, trust
+  WIDGETS.md           # the interactive-canvas rule: every game ships a board
+  PLAYER.md            # agent brief: how to fetch, join, and play a game
+  relay/               # the relay API (FastAPI) + ops notes
   games/
-    tic-tac-toe/       # reference implementation (complete)
-    battleship/        # hidden state via commit-reveal (complete logic)
-    mini-golf/         # deterministic physics sim (working sim + 1 course)
+    tic-tac-toe/       # reference implementation: logic + board, fully playable
+    battleship/        # hidden state via commit-reveal (logic done, board next)
+    mini-golf/         # deterministic physics sim (logic done, board next)
   agents/
     AGENT.md           # playbook: how a Muse agent hosts/plays a game
 ```
 
-## Phase plan
+## How it fits together
 
-- **Phase 0** — solo play vs your agent. No relay. Proves the "played through
-  Muse" UX. (Tic-tac-toe is playable this way today.)
-- **Phase 1** — relay rooms + private game codes. Tic-tac-toe, then battleship
-  (forces the hidden-state design: commit-reveal).
-- **Phase 2** — lobby + random matchmaking. Mini golf, then card games (forces
-  the dealer/trust design).
-- **Phase 3** — validating relay: a small service in front of Redis that checks
-  every move against the rules before accepting it. Kills cheating for real.
+- **Relay** (`relay/`, live at `https://relay.onthe1.app`): rooms, move
+  logs, lobbies, commitments — and the game code itself
+  (`GET /v0/code/{version}/...`). Identity-checked, game-rule-dumb.
+- **Protocol** (`PROTOCOL.md`): how agents get the code, the exact message
+  formats for rooms and moves, hidden-state patterns, the security model.
+- **Boards** (`WIDGETS.md`): every game renders as a tappable board widget,
+  always. The widget polls the relay and re-renders live; taps flow back to
+  the agent, which validates and posts the move.
+- **Trust**: rooms pin the exact commit; releases are SSH-signed tags;
+  agents verify before first run.
 
-## Design decisions (the short version)
+## Status
 
-See [PROTOCOL.md](PROTOCOL.md) for the full story.
+Working: relay rooms + private codes + lobby over the public HTTPS API,
+code distribution from the relay, signed releases (`v0.1.0`), interactive
+board widgets, tic-tac-toe fully playable end-to-end.
 
-- **Event-sourced rooms.** The move log is the truth; state is folded from it.
-  Replays, audits, and catch-up for new joiners are free.
-- **Deterministic logic.** Game code is pure functions of `(state, move)`. Mini
-  golf physics resolve identically on every computer — anyone can re-verify a
-  shot, which is also the anti-cheat story.
-- **Hidden state never touches the relay.** Battleship fleets and card hands
-  live only on the owner's computer. Battleship honesty comes from
-  commit-reveal: placements are hashed before play, revealed after, and every
-  hit/miss claim is checkable.
-- **Relay-first networking.** Players never connect to each other (NAT,
-  strangers, no shared network). The Redis relay holds lobbies, rooms, and logs.
-- **v0 trusts players, verifies afterwards.** Fine for friendly play. The
-  validating relay (phase 3) makes cheating impossible for turn-based games.
+Next: battleship commit-reveal wired end-to-end, mini-golf course select,
+boards for both, and the player skill/connector so any Muse can discover and
+play without a manual brief.
 
 ## Try it
 
-Clone this repo, then have your Muse agent read `agents/AGENT.md`. It knows
-what to do from there. To play tic-tac-toe against your agent right now, just
-ask it.
+Have your Muse agent read `PLAYER.md`. It knows what to do from there — or
+ask it to start a tic-tac-toe game and tap away.

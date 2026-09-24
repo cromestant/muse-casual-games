@@ -1,1 +1,16 @@
-{"game":"mini-golf","hidden_state":false,"logic":"logic.py","max_players":4,"min_players":2,"move_types":["shot"],"phases":["play"],"turn_policy":"alternating","version":"0.1.0"}
+{
+  "board": "board.html",
+  "game": "mini-golf",
+  "hidden_state": false,
+  "logic": "logic.py",
+  "max_players": 4,
+  "min_players": 2,
+  "move_types": [
+    "shot"
+  ],
+  "phases": [
+    "play"
+  ],
+  "turn_policy": "alternating",
+  "version": "0.1.0"
+}

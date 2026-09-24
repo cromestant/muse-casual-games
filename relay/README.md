@@ -1,11 +1,48 @@
-# Relay (v0: dumb pipe)
+# Relay (v0: dumb pipe over HTTPS)
 
-One Redis. No custom server code in v0 — the relay is purely a shared
-append-only log plus a lobby. Agents speak Redis directly (or through a thin
-wrapper). Everything the relay stores is public to all players; see
-PROTOCOL.md "Hidden state" for what must never go here.
+The relay is a small FastAPI service (`api.py`) on Charles's VPS, exposed
+publicly as `https://relay.onthe1.app` (nginx terminates TLS and
+reverse-proxies to 127.0.0.1:8001). Players speak plain HTTPS — no Redis,
+no SSH, no credentials beyond their own handle secret.
 
-## Keyspace
+It stores state in the box's existing Redis 8.10.1 (DB index **5**, key
+prefix **`mg:`**), which is shared with the VPS's other apps — **do not
+reconfigure Redis** (no `requirepass`, no config changes). The Redis
+keyspace below is server-internal; players only ever see the HTTP API.
+
+## API
+
+Auth: every mutating call carries `{handle, secret}`. Register once via
+`POST /v0/players/register`; the secret is stored as a sha256 hash. The API
+checks identity (a handle may only post to its own seat) but does **not**
+validate game rules — clients validate moves with the pinned game logic
+before sending. v0 trusts players, verifies afterwards. Wrong secret → 401,
+wrong seat → 403, unknown room/version → 404.
+
+| Method & path | What it does |
+|---|---|
+| `GET /health` | liveness (also pings Redis) |
+| `POST /v0/players/register` | `{handle, secret}` → registers the handle |
+| `POST /v0/rooms` | `{handle, secret, game, version_sha, seats[], config{}}` → `{code}` |
+| `GET /v0/rooms/{code}` | room meta |
+| `POST /v0/rooms/{code}/moves` | `{handle, secret, seat, type, payload}` → `{seq}` |
+| `GET /v0/rooms/{code}/moves?since=N` | the move log (public; board widgets poll this — CORS open for GET) |
+| `POST /v0/rooms/{code}/finish` | any seat member marks the room finished |
+| `POST /v0/rooms/{code}/commits` | `{handle, secret, commitment}` (commit-reveal games) |
+| `GET /v0/rooms/{code}/commits` | seat → commitment map |
+| `POST /v0/lobby/{game}/join` · `GET /v0/lobby/{game}` · `POST /v0/lobby/{game}/leave` | matchmaking |
+| `GET /v0/code/versions` | signed release tags the relay can serve, e.g. `["v0.1.0"]` |
+| `GET /v0/code/{version}/games` | `[{slug, manifest}]` — the live game list |
+| `GET /v0/code/{version}/{path}` | raw file bytes at that tag/commit (e.g. `games/tic-tac-toe/logic.py`) |
+
+**Code distribution.** The relay serves the game code itself from a local
+clone of the public repo (`/var/www/relay.onthe1.app/code`, kept fresh with
+a lazy `git fetch --tags` on cache miss) via `git show` — no working tree
+involved. `{version}` is a tag or a full commit SHA; paths with `..` are
+rejected. GitHub stays the source of truth: releases are pushed and signed
+there; the relay is a convenience mirror serving identical bytes.
+
+## Keyspace (server-internal)
 
 | Key | Type | Content |
 |---|---|---|
@@ -13,109 +50,33 @@ PROTOCOL.md "Hidden state" for what must never go here.
 | `mg:lobby:<game>` | list | JSON `{"handle", "since_ts"}` entries |
 | `mg:rooms` | set | room codes |
 | `mg:room:<code>` | hash | `game`, `version_sha`, `seats` (JSON list of handles), `status` (`open`/`active`/`finished`), `config` (JSON), `created_ts` |
-| `mg:room:<code>:moves` | stream | move envelopes (see PROTOCOL.md) |
+| `mg:room:<code>:moves` | list | JSON move envelopes, in order (seq = list index + 1) |
 | `mg:room:<code>:commits` | hash | seat → commitment hex (commit-reveal games only) |
 
-## Flows
+Everything the relay stores is public to all players; see PROTOCOL.md
+"Hidden state" for what must never go here.
 
-**Private room (game code):**
-1. Creator's agent: `HSET mg:room:GOLF-7Q2P game mini-golf version_sha <sha> seats '["a","b"]' status open ...`, `SADD mg:rooms GOLF-7Q2P`.
-2. Creator texts the code to their friend.
-3. Friend's agent reads the room hash, verifies the SHA, fetches that exact
-   game commit, folds any existing moves.
-4. Play: turn-holder's agent validates locally, then `XADD mg:room:<code>:moves * ...`.
+## Running it
 
-**Matchmaking:**
-1. Agent: `RPUSH mg:lobby:tic-tac-toe '{"handle":"x","since_ts":...}'`.
-2. Any watching agent sees length ≥ min_players, `LPOP`s that many handles,
-   creates the room, and tells each human the code in chat.
+Live since 2026-09-24 as user `muse`, served from `/var/www/relay.onthe1.app`
+(systemd user service `relay-api.service`). Deploy: copy `api.py` (and keep
+the `code/` clone fetching), `systemctl --user restart relay-api.service`.
 
-## Running it (live)
+Legacy notes:
 
-The relay is live on `server.onthe1.app` (Charles's Ubuntu VPS) since
-2026-09-24. It uses the **already-running Redis 8.10.1** on 127.0.0.1:6379 —
-shared with the box's existing apps (nginx/PHP/FastAPI), so **do not
-reconfigure it** (no `requirepass`, no config changes; it has no password and
-must stay that way for the existing apps).
+- `via_ssh.sh` + `selftest_player.py` are the original Redis/SSH path and the
+  2026-09-24 two-agent self-test (which found and fixed a remote-shell quoting
+  bug — see the script header). Kept for reference; the HTTP API is the way
+  in now.
+- `docker-compose.yml` is an isolated-Redis alternative for a fresh box —
+  not currently in use.
+- Server setup (already done, recorded here): nginx site
+  `relay.onthe1.app.conf` + `certbot --nginx -d relay.onthe1.app` +
+  `loginctl enable-linger muse` so the user service survives reboots.
 
-- **Game keyspace:** DB index **5**, key prefix **`mg:`** (e.g.
-  `mg:room:{id}:moves`). DB 5 is otherwise empty; DB 0 holds the existing
-  apps' keys — leave it alone.
-- **Access:** localhost-only in phase 1. Agents reach it via SSH:
-  `ssh vps` (user `muse`, key in place) then `redis-cli -n 5 …`, or a tunnel:
-  `ssh -L 6379:localhost:6379 -N vps`. Nothing is exposed publicly.
-- **Phase 2 (stranger matchmaking):** expose Redis with TLS +
-  `requirepass` on `relay.onthe1.app`, or run the isolated instance below.
+## What's next
 
-`docker-compose.yml` in this directory is the isolated-instance alternative
-(dedicated Redis with password, for phase 2 or a fresh box) — not currently
-in use.
-
-## HTTP API (no Redis/SSH needed for players)
-
-`api.py` is a small FastAPI service that exposes the same keyspace over
-JSON/HTTP, so players never need Redis credentials or SSH. It runs on the
-VPS as user `muse`, served from `/var/www/relay.onthe1.app`
-(systemd user service `relay-api.service`, port 127.0.0.1:8001); nginx
-terminates TLS at `https://relay.onthe1.app` and
-reverse-proxies to it (config: `relay.onthe1.app.conf`).
-
-Auth: every mutating call carries `{handle, secret}`. Register once via
-`POST /v0/players/register`; the secret is stored as a sha256 hash at
-`mg:player:<handle>`. The API checks identity (a handle may only post to
-its own seat) but does **not** validate game rules — clients validate moves
-with the pinned game logic before sending, exactly like the Redis path.
-v0 trusts players, verifies afterwards.
-
-| Method & path | What it does |
-|---|---|
-| `GET /health` | liveness (also checks Redis) |
-| `POST /v0/players/register` | `{handle, secret}` → registers the handle |
-| `POST /v0/rooms` | `{handle, secret, game, version_sha, seats[], config{}}` → `{code}` |
-| `GET /v0/rooms/{code}` | room meta |
-| `POST /v0/rooms/{code}/moves` | `{handle, secret, seat, type, payload}` → `{seq}` |
-| `GET /v0/rooms/{code}/moves?since=N` | move envelopes (the log) |
-| `POST /v0/rooms/{code}/finish` | any seat member marks the room finished |
-| `POST /v0/rooms/{code}/commits` | `{handle, secret, commitment}` (commit-reveal) |
-| `GET /v0/rooms/{code}/commits` | seat → commitment map |
-| `POST /v0/lobby/{game}/join` · `GET /v0/lobby/{game}` · `POST /v0/lobby/{game}/leave` | matchmaking |
-
-Server notes (for whoever holds root on the box):
-
-```bash
-# one-time nginx + TLS setup (as root):
-cp /home/muse/relay.onthe1.app.conf /etc/nginx/sites-enabled/relay.onthe1.app
-certbot --nginx -d relay.onthe1.app
-nginx -t && systemctl reload nginx
-# so the API survives reboots without anyone logged in:
-loginctl enable-linger muse
-```
-
-The API writes the same `mg:` keys in DB 5, so Redis-path and HTTP-path
-clients can share rooms. `selftest_player.py` is a scripted player used for
-the 2026-09-24 two-agent relay self-test (found and fixed a remote-shell
-quoting bug in `via_ssh.sh` — see its header).
-
-```yaml
-services:
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
-    ports:
-      - "100.100.x.x:6379:6379"   # VPS tailnet IP only
-    volumes:
-      - ./data:/data
-    restart: unless-stopped
-```
-
-Notes:
-
-- v0 assumes a trusted network path to the relay (Tailscale, or TLS +
-  `--requirepass`). Redis 7 supports TLS natively if you need public-internet
-  exposure — do that before inviting strangers.
-- Back up `./data` (AOF is on). Losing the relay loses live rooms; finished
-  games can be re-folded from any client's copy of the log, so ask players to
-  keep logs of games they care about.
-- Phase 3 replaces direct Redis access with a small validating HTTP service in
-  front of it. The keyspace stays the same; agents just stop speaking Redis
-  directly.
+- Battleship commit-reveal wired end-to-end over this API.
+- A validating relay in front of the keyspace (checks every move against the
+  rules) — cheating becomes impossible, not just detectable. The API shapes
+  stay the same; clients just get 422s on illegal moves.
