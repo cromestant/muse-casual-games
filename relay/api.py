@@ -21,11 +21,22 @@ import time
 
 import redis
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 r = redis.Redis(host="127.0.0.1", port=6379, db=5, decode_responses=True)
 
 app = FastAPI(title="muse-games relay", version="0.1.0")
+
+# Board widgets poll the public read endpoints from the player's browser.
+# Reads are public data (rooms, move logs, lobby); all mutating calls still
+# need the handle secret, which never goes into widget HTML.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
 # ---------- models ----------
