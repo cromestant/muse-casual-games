@@ -55,8 +55,9 @@ in use.
 
 `api.py` is a small FastAPI service that exposes the same keyspace over
 JSON/HTTP, so players never need Redis credentials or SSH. It runs on the
-VPS as user `muse` (systemd user service `relay-api.service`, port
-127.0.0.1:8001); nginx terminates TLS at `https://relay.onthe1.app` and
+VPS as user `muse`, served from `/var/www/relay.onthe1.app`
+(systemd user service `relay-api.service`, port 127.0.0.1:8001); nginx
+terminates TLS at `https://relay.onthe1.app` and
 reverse-proxies to it (config: `relay.onthe1.app.conf`).
 
 Auth: every mutating call carries `{handle, secret}`. Register once via
