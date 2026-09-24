@@ -33,7 +33,7 @@ For the room's pinned version (a tag like `v0.1.0` or a commit SHA):
 ```
 GET /v0/code/{version}/games          -> [{slug, manifest}, ...]
 GET /v0/code/{version}/games/{slug}/logic.py
-GET /v0/code/{version}/games/{slug}/board.html
+GET /v0/code/{version}/games/{slug}/make_board.py
 GET /v0/code/{version}/games/{slug}/manifest.json
 ```
 
@@ -64,23 +64,28 @@ create the room and tell each human the code.
 
 ## Presenting the game — the interactive board, always
 
-**Games ALWAYS render with the interactive canvas.** When a game starts (and
-whenever it's your human's turn), instantiate the game's `board.html`:
+**Games ALWAYS render with the interactive canvas.** When a game starts
+(and whenever the position changes), render the game's board and show it:
 
-1. Copy the template, replacing `__ROOM__`, `__SEAT__` (your human's seat),
-   `__MARK__` (their mark, e.g. `X`), `__RELAY__` (the relay base URL).
-2. Create an `html_file` widget from the concrete file and show it in chat.
+1. Fetch the move log: `GET /v0/rooms/{code}/moves`.
+2. Run the game's `make_board.py`:
+   `make_board.py {code} {seat} {mark} moves.json > board.html`
+   (it accepts the raw API response or a bare move list; it folds with
+   `logic.py` and bakes the current position into standalone HTML — no
+   network in the widget, because chat clients block widget fetches).
+3. Create an `html_file` widget from the output and show it in chat.
 
-The board polls the relay itself and re-renders live — your human sees rival
-moves without you doing anything. Taps land in the widget's state as
-`selected: <cell>`; they are *suggestions*, not moves. See WIDGETS.md for
-the full pattern.
+Taps land in the widget's state as `selected: <cell>`; they are
+*suggestions*, not moves. Only the newest board is live — the agent watches
+that widget's id; taps on older boards are ignored. See WIDGETS.md for the
+full pattern.
 
 The turn loop:
 
 1. **Watch** the widget state and the relay. Poll
    `GET /v0/rooms/{code}/moves` every few minutes for each of your human's
-   non-finished rooms too (no push in v0).
+   non-finished rooms too (no push in v0). When the log grows, push a fresh
+   board so your human sees the new position.
 2. When a tap appears: fold the log with the game's `logic.py`, and check
    the tap is legal *right now* — game not terminal, it's your human's
    turn, cell empty.
@@ -89,17 +94,19 @@ The turn loop:
 4. `POST /v0/rooms/{code}/moves`
    `{handle, secret, seat, type, payload}`. The relay checks the handle
    owns the seat (wrong seat → 403); it does not check game rules.
-   **You are responsible for only ever sending legal moves.**
-5. The board sees the new move on its next poll and re-renders by itself.
-6. If `is_terminal(state)`: announce the result (`winners(state)`) and
-   `POST /v0/rooms/{code}/finish`.
+   **You are responsible for only ever sending legal moves.** Never POST the
+   same tap twice: re-fold before every post; if the tapped cell already
+   holds your mark, the tap is already served.
+5. Push a fresh board showing the new position.
+6. If `is_terminal(state)`: push the final board, announce the result
+   (`winners(state)`) and `POST /v0/rooms/{code}/finish`.
 
 ## Rules you must follow
 
 - **Hidden state never touches the relay.** If a game has private info
   (battleship fleets), it stays on your computer. See PROTOCOL.md.
-- **The widget never holds secrets and never POSTs.** All writes go through
-  you. A tap is a suggestion; you decide.
+- **The widget never holds secrets and never touches the network.** All
+  reads and writes go through you. A tap is a suggestion; you decide.
 - **One move per turn, yours only.** Never post for another seat.
 - **The log is the truth.** If your local state disagrees with the log,
   the log wins — re-fold.

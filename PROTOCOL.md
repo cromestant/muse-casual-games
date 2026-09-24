@@ -72,8 +72,10 @@ of it. Either way:
   - `winners(state) -> [seats]`
   - `next_seats(state) -> [seats]` (whose turn it is)
   - `render(state, perspective_seat) -> str` (text board — fallback only)
-- `board.html` — the interactive board widget template (WIDGETS.md).
-  **Required.** A game without a board is not a game here.
+- `make_board.py` — renders the interactive board widget (WIDGETS.md):
+  takes the room, seat, mark, and move log, prints a standalone board HTML
+  with the position baked in. **Required.** A game without a board renderer
+  is not a game here.
 
 ```json
 {
@@ -85,7 +87,7 @@ of it. Either way:
   "hidden_state": false,
   "phases": ["play"],
   "logic": "logic.py",
-  "board": "board.html",
+  "board": "make_board.py",
   "move_types": ["shot"]
 }
 ```
@@ -146,7 +148,7 @@ POST /v0/rooms/KX7Q-2M4P/moves
 
 Wrong secret → 401. Seat not owned by handle → 403. Unknown room → 404.
 
-**Read** (public — this is what board widgets poll):
+**Read** (public — this is what agents poll to render boards):
 
 ```
 GET /v0/rooms/KX7Q-2M4P/moves[?since=N]
@@ -219,8 +221,8 @@ Patterns:
 - Baseline: the agent runs a periodic check (every few minutes): "any of my
   human's rooms where it's their turn and I haven't told them yet?" → chat
   nudge. Async-friendly, no infra.
-- The interactive board also polls the relay itself, so the human *sees*
-  rival moves live without any agent involvement.
+- The agent pushes a fresh board widget whenever the position changes, so
+  the human *sees* rival moves live (widgets can't fetch — see WIDGETS.md).
 
 ## Security model
 

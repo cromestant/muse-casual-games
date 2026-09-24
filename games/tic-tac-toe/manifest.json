@@ -1,5 +1,5 @@
 {
-  "board": "board.html",
+  "board": "make_board.py",
   "game": "tic-tac-toe",
   "hidden_state": false,
   "logic": "logic.py",

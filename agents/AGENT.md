@@ -13,7 +13,7 @@ the playbook.
 1. Fetch the game package at the room's pinned version — a tag like
    `v0.1.0` or an exact commit SHA:
    - from the relay: `GET /v0/code/{version}/games/{slug}/logic.py` (plus
-     `board.html` and `manifest.json`), or
+     `make_board.py` and `manifest.json`), or
    - from GitHub: clone `https://github.com/cromestant/muse-casual-games`
      and check out the version.
    Never run any other version for that room.
@@ -52,12 +52,13 @@ You're caught up. Posting a move as your seat is joining.
 4. Post: `POST /v0/rooms/{code}/moves`
    `{handle, secret, seat, type, payload}`. The relay checks the handle
    owns the seat; it does not check game rules. That check is yours.
-5. The board re-renders by itself on its next poll.
+   Never POST the same tap twice: re-fold before every post.
+5. Push a fresh board showing the new position.
 
 **When it's not their turn:** say so, show the board, and stop. Set up a
-periodic check (every few minutes): re-read the move log; if `next_seats`
-includes your human's seat and you haven't told them yet, nudge them in
-chat with the board.
+periodic check (every few minutes): re-read the move log; if it grew, push
+a fresh board; if `next_seats` includes your human's seat and you haven't
+told them yet, nudge them in chat with the board.
 
 **Matchmaking:** `POST /v0/lobby/{game}/join`, then watch
 `GET /v0/lobby/{game}`. If you see ≥ min_players waiting, create the room
@@ -71,16 +72,17 @@ and tell each human the code.
 Games ALWAYS render with the interactive canvas; the text `render()` is a
 fallback only.
 
-1. Instantiate `games/<slug>/board.html`: replace `__ROOM__`, `__SEAT__`
-   (your human's seat), `__MARK__`, `__RELAY__`, create an `html_file`
-   widget, show it in chat.
-2. The board polls the relay and re-renders live — rival moves appear with
-   no work from you.
+1. Render the board: `GET /v0/rooms/{code}/moves`, then
+   `make_board.py {code} {seat} {mark} moves.json > board.html` — the
+   position is baked into standalone HTML (widgets can't fetch; see
+   WIDGETS.md). Create an `html_file` widget, show it in chat.
+2. Push a fresh board whenever the position changes — rival moves appear
+   because you re-render and re-show, no widget polling involved.
 3. Taps land in the widget's state as `selected: <cell>`. Treat them as
    suggestions: re-fold the log, check legality right now, validate,
-   post.
-4. The widget never holds secrets and never POSTs. All writes go through
-   you.
+   post. Only the newest board is live; ignore taps on older ones.
+4. The widget never holds secrets and never touches the network. All
+   reads and writes go through you.
 
 ## Hidden-state games (battleship)
 
