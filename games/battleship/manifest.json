@@ -1,0 +1,1 @@
+{"game":"battleship","hidden_state":true,"logic":"logic.py","max_players":2,"min_players":2,"move_types":["commit","shot","result","reveal"],"phases":["commit","play","reveal"],"turn_policy":"commit","version":"0.1.0"}

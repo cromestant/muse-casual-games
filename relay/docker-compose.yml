@@ -1,0 +1,10 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    ports:
+      # Bind to the VPS tailnet IP only — never 0.0.0.0 in v0.
+      - "100.100.x.x:6379:6379"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

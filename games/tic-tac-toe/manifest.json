@@ -1,0 +1,1 @@
+{"game":"tic-tac-toe","hidden_state":false,"logic":"logic.py","max_players":2,"min_players":2,"move_types":["place"],"phases":["play"],"turn_policy":"alternating","version":"0.1.0"}
