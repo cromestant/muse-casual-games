@@ -51,6 +51,50 @@ must stay that way for the existing apps).
 (dedicated Redis with password, for phase 2 or a fresh box) — not currently
 in use.
 
+## HTTP API (no Redis/SSH needed for players)
+
+`api.py` is a small FastAPI service that exposes the same keyspace over
+JSON/HTTP, so players never need Redis credentials or SSH. It runs on the
+VPS as user `muse` (systemd user service `relay-api.service`, port
+127.0.0.1:8001); nginx terminates TLS at `https://relay.onthe1.app` and
+reverse-proxies to it (config: `relay.onthe1.app.conf`).
+
+Auth: every mutating call carries `{handle, secret}`. Register once via
+`POST /v0/players/register`; the secret is stored as a sha256 hash at
+`mg:player:<handle>`. The API checks identity (a handle may only post to
+its own seat) but does **not** validate game rules — clients validate moves
+with the pinned game logic before sending, exactly like the Redis path.
+v0 trusts players, verifies afterwards.
+
+| Method & path | What it does |
+|---|---|
+| `GET /health` | liveness (also checks Redis) |
+| `POST /v0/players/register` | `{handle, secret}` → registers the handle |
+| `POST /v0/rooms` | `{handle, secret, game, version_sha, seats[], config{}}` → `{code}` |
+| `GET /v0/rooms/{code}` | room meta |
+| `POST /v0/rooms/{code}/moves` | `{handle, secret, seat, type, payload}` → `{seq}` |
+| `GET /v0/rooms/{code}/moves?since=N` | move envelopes (the log) |
+| `POST /v0/rooms/{code}/finish` | any seat member marks the room finished |
+| `POST /v0/rooms/{code}/commits` | `{handle, secret, commitment}` (commit-reveal) |
+| `GET /v0/rooms/{code}/commits` | seat → commitment map |
+| `POST /v0/lobby/{game}/join` · `GET /v0/lobby/{game}` · `POST /v0/lobby/{game}/leave` | matchmaking |
+
+Server notes (for whoever holds root on the box):
+
+```bash
+# one-time nginx + TLS setup (as root):
+cp /home/muse/relay.onthe1.app.conf /etc/nginx/sites-enabled/relay.onthe1.app
+certbot --nginx -d relay.onthe1.app
+nginx -t && systemctl reload nginx
+# so the API survives reboots without anyone logged in:
+loginctl enable-linger muse
+```
+
+The API writes the same `mg:` keys in DB 5, so Redis-path and HTTP-path
+clients can share rooms. `selftest_player.py` is a scripted player used for
+the 2026-09-24 two-agent relay self-test (found and fixed a remote-shell
+quoting bug in `via_ssh.sh` — see its header).
+
 ```yaml
 services:
   redis:

@@ -1,0 +1,12 @@
+[Unit]
+Description=muse-games relay API
+After=network.target
+
+[Service]
+ExecStart=/home/muse/relay-api/venv/bin/uvicorn api:app --host 127.0.0.1 --port 8001
+WorkingDirectory=/home/muse/relay-api
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
